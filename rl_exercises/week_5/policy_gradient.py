@@ -68,10 +68,14 @@ class Policy(nn.Module):
         super().__init__()
         self.state_dim = int(np.prod(state_space.shape))
         self.n_actions = action_space.n
+        # self.n = networks.QNetwork(self.state_dim,self.n_actions,hidden_size)
 
         # TODO: Define two linear layers: self.fc1 and self.fc2
         # self.fc1 should map from self.state_dim to hidden_size
         # self.fc2 should map from hidden_size to self.n_actions
+
+        self.fc1 = nn.Linear(self.state_dim, hidden_size)  # nn.Linear nochmal anschauen
+        self.fc2 = nn.Linear(hidden_size, self.n_actions)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -90,7 +94,14 @@ class Policy(nn.Module):
         # TODO: Apply fc1 followed by ReLU (Flatten input if needed)
         # TODO: Apply fc2 to get logits
         # TODO: Return softmax over logits along the last dimension
-        pass
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # Make it (1, state_dim) for single state
+
+        x = self.fc1(x)
+        x = torch.relu(x)
+        logits = self.fc2(x)
+        prob_dis = torch.softmax(logits, dim=-1)
+        return prob_dis
 
 
 class REINFORCEAgent(AbstractAgent):
@@ -164,7 +175,17 @@ class REINFORCEAgent(AbstractAgent):
         # TODO: Pass state through the policy network to get action probabilities
         # If evaluate is True, return the action with highest probability
         # Otherwise, sample from the action distribution and return the log-probability as a key in the dictionary (Hint: use torch.distributions.Categorical)
-        return 0, {}  # Placeholder return value
+        st = torch.tensor(np.array(state), dtype=torch.float32)
+        act_prob = self.policy.forward(st)
+        if evaluate:
+            action = torch.argmax(act_prob, dim=-1).item()
+            return action, {}
+
+        else:
+            dist = torch.distributions.Categorical(act_prob)
+            action = dist.sample().item()
+            log_prob = dist.log_prob(torch.tensor(action))
+            return action, {"log_prob": log_prob}
 
     def compute_returns(self, rewards: List[float]) -> torch.Tensor:
         """
@@ -186,7 +207,13 @@ class REINFORCEAgent(AbstractAgent):
         #       - Update R = r + gamma * R
         #       - Insert R at the beginning of the returns list
         # TODO: Convert the list of returns to a torch.Tensor and return
-        pass
+
+        returns = []
+        G = 0.0
+        for r in reversed(rewards):
+            G = r + self.gamma * G
+            returns.insert(0, G)
+        return torch.tensor(returns, dtype=torch.float32)
 
     def update_agent(
         self,
@@ -216,7 +243,10 @@ class REINFORCEAgent(AbstractAgent):
 
         # TODO: Normalize returns with mean and standard deviation,
         # and add 1e-8 to the denominator to avoid division by zero
-        norm_returns = returns_t
+
+        norm_returns = (returns_t - returns_t.mean()) / (
+            returns_t.std(unbiased=False) + 1e-8
+        )
 
         lp_tensor = torch.stack(log_probs)
         loss = -torch.sum(lp_tensor * norm_returns)
@@ -278,13 +308,26 @@ class REINFORCEAgent(AbstractAgent):
             Standard deviation of returns.
         """
         self.policy.eval()
-        returns: List[float] = []  # noqa: F841
+        returns: List[float] = []
         # TODO: rollout num_episodes in eval_env and aggregate undiscounted returns across episodes
+
+        for _ in range(num_episodes):
+            state, _ = eval_env.reset()
+            done = False
+            total_reward = 0.0
+
+            while not done:
+                action, _ = self.predict_action(state, evaluate=True)
+                state, reward, terminated, truncated, _ = eval_env.step(action)
+                done = terminated or truncated
+                total_reward += reward  # without discount
+
+        returns.append(total_reward)
 
         self.policy.train()  # Set back to training mode
 
         # TODO: Return the mean and std of the returns across episodes
-        return 0.0, 0.0
+        return float(np.mean(returns)), float(np.std(returns))
 
     def train(
         self,
